@@ -1,6 +1,8 @@
 version: '3.8'
 
 services:
+  # --- 1. Your Main ROS 1 Dev Environment ---
+  # Run with: docker compose up -d ros_dev
   ros_dev:
     build: .
     container_name: ros_pet_container
@@ -13,16 +15,28 @@ services:
       - TERM=xterm-256color
       - DISABLE_ROS1_EOL_WARNINGS=1
     volumes:
-      # 1. REPOS MAPPING
-      # Maps your Host ~/repos to Container ~/repos (/home/dev/repos)
       - ~/repos:/home/dev/repos
-      - ~/bags:/home/dev/bags
-      # 2. WORKSPACE MAPPING
-      # Maps local ~/docker_ros/catkin_ws to Container ~/catkin_ws (/home/dev/catkin_ws)
-      # This preserves your 'build' and 'devel' folders on the host too.
       - ./catkin_ws:/home/dev/catkin_ws
-      
-      # GUI Socket
+      - ~/bag:/home/dev/bags
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    
+    command: tail -f /dev/null
+
+  # --- 2. The Converter Utility ---
+  # Run with: docker compose run --rm converter ...
+  converter:
+    build: .
+    container_name: bag_converter
+    # We use 'no' because this is meant to be run as a one-off command
+    restart: "no"
+    network_mode: host
+    environment:
+      - TERM=xterm-256color
+    volumes:
+      # Mount the current folder so the container sees your python script
+      - .:/app
+      # Mount the bags folder (same as above)
+      - ~/bag:/home/dev/bags
+    user: "1000:1000"
+    working_dir: /home/dev/bags
+    # Default command does nothing, waiting for your input
     command: tail -f /dev/null
