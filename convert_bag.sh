@@ -45,4 +45,4 @@ docker run --rm -it \
   -v "$MOUNT_DIR":/data \
   --user 1000:1000 \
   ros_bag_converter:latest \
-  python3 /home/dev/ros1_to_mcap.py $PY_ARGS
+  python3 /home/dev/convert.py $PY_ARGS

@@ -30,6 +30,7 @@ RUN echo "source /home/$USERNAME/catkin_ws/devel/setup.bash" >> /home/$USERNAME/
 
 # This ensures the script is always available inside the container at a known path.
 COPY --chown=$USERNAME:$USERNAME ros1_to_mcap.py /home/$USERNAME/ros1_to_mcap.py
+COPY --chown=$USERNAME:$USERNAME convert.py /home/$USERNAME/convert.py
 
 # 5. Entrypoint
 USER $USERNAME
