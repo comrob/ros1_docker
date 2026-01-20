@@ -1,6 +1,15 @@
 # ROS1 -> ROS2 (mcap) Bag Conversion
 
 ![ROS Logo](https://github.com/comrob/github-media/blob/main/img/image.png?raw=true)
+## TL;DR
+```
+docker compose build converter
+bash ./install.sh
+
+convert_bag /path/to/ros1_bag_folder --series
+convert_bag /path/to/single_ros1.bag
+convert_bag /path/to/split_0.bag /path/to/split_1.bag --series
+```
 
 
 This repository provides a containerized solution for two primary tasks:
