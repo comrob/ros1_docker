@@ -21,15 +21,13 @@ services:
 
   converter:
     image: ros_bag_converter:latest
-    build: .
-    container_name: bag_converter
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: bag_converter_builder
+    # We set this to "no" restart because it's a utility container
     restart: "no"
     network_mode: host
-    environment:
-      - TERM=xterm-256color
-    volumes:
-      - .:/app
-      - ~/bag:/home/dev/bags
     user: "1000:1000"
-    working_dir: /home/dev/bags
-    command: tail -f /dev/null
+    # This command is just a placeholder; the real work happens in convert_bag.sh
+    command: echo "Container built. Use convert_bag.sh to run conversions."
