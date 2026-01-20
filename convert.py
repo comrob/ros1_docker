@@ -1,10 +1,9 @@
 import sys
 import re
 import argparse
-import time
 import signal
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Optional, Any
 import numpy as np
 
 # ROS1 Reader
@@ -14,7 +13,7 @@ from rosbags.typesys import get_types_from_msg, get_typestore, Stores
 
 # MCAP Writer
 from mcap.writer import Writer as McapWriter
-from mcap.well_known import SchemaEncoding, MessageEncoding
+from mcap.well_known import SchemaEncoding, MessageEncoding, Profile
 
 # --- Signal Handler for Graceful Exit ---
 class GracefulExiter:
@@ -58,7 +57,6 @@ def to_ros2_type(ros1_type: str) -> str:
 
 def fix_ros1_def(text: str, type_name: str) -> str:
     """Parses ROS1 definitions line-by-line to safely convert types to ROS2."""
-    
     if "CameraInfo" in type_name:
         text = text.replace("float64[] D", "float64[] d")
         text = text.replace("float64[9] K", "float64[9] k")
@@ -73,10 +71,7 @@ def fix_ros1_def(text: str, type_name: str) -> str:
         if not stripped:
             fixed_lines.append(line)
             continue
-        
-        if stripped.startswith("uint32 seq"):
-            continue
-
+        if stripped.startswith("uint32 seq"): continue
         if stripped.startswith("MSG:"):
             line = re.sub(r'(^MSG:\s+)([a-zA-Z0-9_]+)/(?!msg/)([a-zA-Z0-9_]+)', r'\1\2/msg/\3', line)
             fixed_lines.append(line)
@@ -169,9 +164,7 @@ def convert_ros1_to_ros2(ros1_obj, ros2_type, ros2_store):
 class BagSeriesConverter:
     def __init__(self, ros_distro="humble"):
         self.ros_distro = ros_distro
-        # UPDATED: Store the deserialized objects, not bytes, so we can edit timestamps
         self.static_tf_cache: List[Any] = []
-        # UPDATED: Store the schema definition TEXT, not the ID
         self.tf_static_def: Optional[str] = None 
         
         print(f"[INFO] Initializing Stores...")
@@ -182,20 +175,19 @@ class BagSeriesConverter:
     def convert_file(self, src: Path, dst: Path, is_part_of_series: bool = False):
         print(f"[INFO] Processing: {src.name} -> {dst.name}")
         
-        # Standard ROS2 type name for static TF
         tf_type_name = "tf2_msgs/msg/TFMessage"
 
         with Reader(src) as reader:
             with open(dst, "wb") as f_out:
                 writer = McapWriter(f_out)
-                writer.start()
-
-                writer.add_metadata("ros_distro", {"name": self.ros_distro})
+                
+                # --- ROS2 Profile ---
+                writer.start(profile=Profile.ROS2) 
                 
                 topic_to_chan_id = {}
                 conn_map = {}
                 type_map = {}
-                registered_schemas = {} # Maps Name -> ID (Scoped to this file only)
+                registered_schemas = {}
                 
                 try:
                     # --- PASS 1: REGISTRATION ---
@@ -224,16 +216,13 @@ class BagSeriesConverter:
                         except Exception as e:
                             print(f"  [WARN] Type register fail {ros2_type}: {e}")
 
-                        # Register Schema (Scoped to current Writer)
                         if ros2_type not in registered_schemas:
                             sid = writer.register_schema(name=ros2_type, encoding=SchemaEncoding.ROS2, data=fixed_def.encode('utf-8'))
                             registered_schemas[ros2_type] = sid
                             
-                            # UPDATED: Capture the DEFINITION, not the ID
                             if conn.topic == TF_STATIC_TOPIC:
                                 self.tf_static_def = fixed_def
                         
-                        # Register Channel
                         if conn.topic not in topic_to_chan_id:
                             meta = {}
                             if conn.topic == TF_STATIC_TOPIC:
@@ -250,18 +239,14 @@ class BagSeriesConverter:
                         conn_map[conn.id] = topic_to_chan_id[conn.topic]
                         type_map[conn.id] = ros2_type
 
-                    # --- INJECTION LOGIC (UPDATED) ---
+                    # --- INJECTION LOGIC ---
                     if is_part_of_series and self.static_tf_cache and not self.exiter.stop_requested:
                         chan_id = 0
                         schema_id_to_use = 0
 
-                        # Determine Schema ID for this specific file
                         if tf_type_name in registered_schemas:
-                            # If tf_static exists in this bag, use its schema ID
                             schema_id_to_use = registered_schemas[tf_type_name]
                         elif self.tf_static_def:
-                            # If missing, REGISTER it using the cached definition from Bag 1
-                            # This generates a NEW, valid ID for this file
                             print(f"  [INFO] Registering missing schema for {tf_type_name}...")
                             schema_id_to_use = writer.register_schema(
                                 name=tf_type_name, 
@@ -271,7 +256,6 @@ class BagSeriesConverter:
                             registered_schemas[tf_type_name] = schema_id_to_use
 
                         if schema_id_to_use != 0:
-                            # Get or Create Channel
                             if TF_STATIC_TOPIC in topic_to_chan_id:
                                 chan_id = topic_to_chan_id[TF_STATIC_TOPIC]
                             else:
@@ -280,31 +264,24 @@ class BagSeriesConverter:
                                 chan_id = writer.register_channel(
                                     topic=TF_STATIC_TOPIC,
                                     message_encoding=MessageEncoding.CDR,
-                                    schema_id=schema_id_to_use, # Use the LOCAL ID
+                                    schema_id=schema_id_to_use,
                                     metadata=meta
                                 )
                                 topic_to_chan_id[TF_STATIC_TOPIC] = chan_id
                         
                         if chan_id != 0:
                             print(f"  [INFO] Injecting {len(self.static_tf_cache)} static transforms...")
-                            # Use current bag start time to patch timestamps
                             start_time = reader.start_time if reader.start_time else 0
                             
-                            # Import Time type for patching
                             from rosbags.typesys.stores.ros2_humble import builtin_interfaces__msg__Time as Time
                             
                             for ros2_msg in self.static_tf_cache:
-                                # PATCH TIMESTAMP: Ensure static TFs look "fresh" relative to this bag
                                 if hasattr(ros2_msg, 'transforms'):
                                     for t in ros2_msg.transforms:
                                         t.header.stamp = Time(sec=int(start_time/1e9), nanosec=int(start_time%1e9))
 
-                                # Serialize using THIS file's type store (safe as types are standard)
                                 cdr_bytes = self.store_ros2.serialize_cdr(ros2_msg, tf_type_name)
-                                
                                 writer.add_message(channel_id=chan_id, log_time=start_time, publish_time=start_time, data=cdr_bytes)
-                        else:
-                            print(f"  [WARN] Cannot inject static TFs: Definition missing.")
 
                     # --- PASS 2: CONVERSION ---
                     print("  [INFO] Converting messages... (Press Ctrl+C to stop safely)")
@@ -328,16 +305,16 @@ class BagSeriesConverter:
                             )
 
                             if conn.topic == TF_STATIC_TOPIC:
-                                # CACHE OBJECT: Store the Python object, not bytes
                                 self.static_tf_cache.append(ros2_msg)
 
                             count += 1
                             if count % 10000 == 0: print(f"         {count}...", end='\r')
                         except Exception: pass
 
-                    print(f"\n  [SUCCESS] {count} messages.")
+                    print(f"\n  [SUCCESS] {count} messages converted.")
 
                 finally:
+                    # Writer finishes cleanly, generating the footer and index automatically
                     writer.finish()
                     print(f"[INFO] File finalized: {dst}")
 

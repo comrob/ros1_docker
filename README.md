@@ -1,147 +1,112 @@
-# ROS Development & Bag Conversion Toolkit
+# ROS Bag Conversion & Development Toolkit
 
-This repository provides a containerized environment for:
-1.  **Converting** ROS 1 `.bag` files to ROS 2 `.mcap` files from any location.
-2.  **Developing** and running ROS 1 (Noetic) packages.
-
-## 📂 Directory Setup
-
-Ensure your host directories are set up as defined in `docker-compose.yml`.
-
-| Host Path | Container Path | Purpose |
-| :--- | :--- | :--- |
-| `~/repos` | `/home/dev/repos` | Source code repositories. |
-| `./catkin_ws` | `/home/dev/catkin_ws` | Your ROS workspace. |
-| `~/bag` | `/home/dev/bags` | **Legacy/Dev only:** Default bag location for the development container. |
-| `.` (Current Dir) | `/app` | Internal scripts. |
+This repository provides a streamlined Docker environment for two distinct purposes:
+1.  **Converter:** A standalone utility to convert ROS 1 (`.bag`) files to ROS 2 (`.mcap`) with support for split bags and static TF injection.
+2.  **Dev Environment:** A persistent container for developing, building, and running ROS 1 (Noetic) packages.
 
 ---
 
-## ⚙️ Installation (One-Time Setup)
+## ⚡ Quick Start: The Converter
 
-Before using the converter, you must build the image and set up the helper script.
+No ROS installation is required on your host. Just Docker.
 
-### 1. Build the Converter Image
-This bakes the conversion script into the Docker image:
+### 1. Installation
+Run the install script to build the Docker image and link the command to your path.
+
 ```bash
+# Builds the image 'ros_bag_converter' and symlinks the script to ~/.local/bin
 docker compose build converter
+./install.sh
 
 ```
 
-### 2. Install the Wrapper Script
+*(Ensure `~/.local/bin` is in your `$PATH`. You may need to restart your terminal).*
 
-To run the conversion from any directory, create an alias or symlink to `convert_bag.sh`.
+### 2. Usage
 
-**Option A: System-wide (Recommended)**
+You can now run `convert_bag` from any directory on your computer.
 
-```bash
-chmod +x convert_bag.sh
-# Ensure ~/.local/bin exists and is in your PATH
-mkdir -p ~/.local/bin
-ln -s $(pwd)/convert_bag.sh ~/.local/bin/convert_bag
-
-```
-
-**Option B: Shell Alias**
-Add this to your `~/.bashrc`:
-
-```bash
-alias convert_bag='/path/to/your/docker_ros/convert_bag.sh'
-
-```
-
----
-
-## 🚀 1. Converting Bag Files
-
-You can now convert files located **anywhere** on your system without moving them.
-
-### Usage
-
-Simply run the command followed by the path to your bag file:
+**Single File Conversion**
 
 ```bash
 convert_bag /path/to/my_recording.bag
 
 ```
 
-**Features:**
+*Output: `/path/to/my_recording.mcap*`
 
-* **Automatic Output Name:** By default, it creates `/path/to/my_recording.mcap`.
-* **Optional Output Name:** You can specify a custom output name as a second argument:
+**Split Bags (Series) Conversion**
+If you have a folder of split bags (e.g., `_0.bag`, `_1.bag`), point to the folder and add `--series`:
+
 ```bash
-convert_bag my_recording.bag my_custom_name.mcap
+convert_bag /path/to/recording_folder --series
 
 ```
 
+**Advanced Options**
+The script passes flags directly to the internal Python converter:
 
-* **Safety:** The script refuses to overwrite the input file if you accidentally specify the same name.
+```bash
+# Specify target ROS 2 distro for metadata
+convert_bag my.bag --distro iron
+
+# Convert specific files in the current folder
+convert_bag bag1.bag bag2.bag --series
+
+```
 
 ---
 
-## 🛠️ 2. Running ROS 1 Packages
+## 🛠️ ROS 1 Development Environment
 
-The `ros_dev` service is a persistent container for development, compilation, and execution (including GUI tools like Rviz).
+The `ros_dev` service is a full desktop environment for compiling and running ROS 1 nodes.
 
-### Start the Environment
+### 📂 Directory Setup
 
-Start the container in the background:
+Ensure your host directories map to the container as defined in `docker-compose.yml`:
+
+| Host Path | Container Path | Purpose |
+| --- | --- | --- |
+| `~/repos` | `/home/dev/repos` | Your source code/git repositories. |
+| `./catkin_ws` | `/home/dev/catkin_ws` | Active ROS workspace. |
+| `/tmp/.X11-unix` | `/tmp/.X11-unix` | For GUI/Rviz support. |
+
+### Workflow
+
+**1. Start the Container**
 
 ```bash
 docker compose up -d ros_dev
 
 ```
 
-### Enter the Container
-
-Open a shell inside the running container:
+**2. Enter the Shell**
 
 ```bash
 docker exec -it ros_pet_container bash
 
 ```
 
-### Workflow inside the Container
+**3. Build & Run**
+Inside the container, you are the user `dev`.
 
-Once inside, you are user `dev` in `~/catkin_ws`.
-
-1. **Build Workspace:**
 ```bash
+# Build workspace
 catkin build
 
-```
-
-
-2. **Source Environment:**
-```bash
+# Source environment
 source devel/setup.bash
 
-```
-
-
-3. **Run Packages:**
-```bash
-roslaunch my_package my_launchfile.launch
+# Run nodes
+roslaunch my_package my.launch
 
 ```
 
+**4. GUI Apps (Rviz/Rqt)**
+The container shares the host's X11 socket.
 
-4. **GUI Tools:**
-If you have X11 forwarding configured (handled by `DISPLAY` env var), you can run GUI apps directly:
 ```bash
-roscore &
 rviz
-
-```
-
-
-
-### Stopping the Environment
-
-To stop and remove the dev container:
-
-```bash
-docker compose down
 
 ```
 
@@ -149,17 +114,18 @@ docker compose down
 
 ## ⚠️ Troubleshooting
 
-**"docker: command not found" inside the script**
+**`convert_bag: command not found`**
 
-* **Cause:** Docker is not installed or the user does not have permission to run it.
-* **Fix:** Ensure you can run `docker ps` without sudo.
+* Ensure `~/.local/bin` is in your PATH. Add `export PATH=$PATH:$HOME/.local/bin` to your `~/.bashrc`.
 
-**"File not found"**
+**`docker: command not found` inside the script**
 
-* **Cause:** The script checks for the file before running Docker.
-* **Fix:** Ensure the path provided to `convert_bag` is correct relative to your current terminal location.
+* You might need to add your user to the docker group: `sudo usermod -aG docker $USER`.
 
-**Changes to `ros1_to_mcap.py` not appearing**
+**Updates to `convert.py` are ignored**
 
-* **Cause:** The Python script is copied into the Docker image during the build.
-* **Fix:** If you edit the Python code, you must run `docker compose build converter` again.
+* The Python script is baked into the Docker image. If you edit `convert.py`, you **must** rebuild:
+```bash
+docker compose build converter
+
+```
