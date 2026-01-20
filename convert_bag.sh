@@ -1,5 +1,37 @@
 #!/bin/bash
 
+
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
+# <--- INSERT START --->
+# --- 0. Help Flag Handler ---
+# If help is requested, bypass path checks/mounting and let Python print usage.
+for arg in "$@"; do
+    if [[ "$arg" == "--help" ]] || [[ "$arg" == "-h" ]]; then
+        echo "==============================================================="
+        echo " ROS1 -> MCAP Converter (Dockerized Wrapper)"
+        echo "==============================================================="
+        echo " This script wraps the conversion logic in a Docker container."
+        echo " It automatically mounts the input directory to /data inside"
+        echo " the container and forwards arguments to the internal script."
+        echo ""
+        echo " [WRAPPER CONSTRAINTS]"
+        echo "   1. All input files must reside in the same host directory."
+        echo "   2. Output is saved to the source directory (or defined subfolder)."
+        echo ""
+        echo " [INTERNAL PYTHON HELP]"
+        
+        # Run the internal help
+        HOST_DATA_DIR="." \
+        CURRENT_UID=$(id -u) \
+        CURRENT_GID=$(id -g) \
+        docker compose -f "$SCRIPT_DIR/docker-compose.yml" run --rm converter \
+        python3 /home/dev/convert.py --help
+        
+        exit 0
+    fi
+done
+
 # Usage Check
 if [ -z "$1" ]; then
     echo "Usage: convert_bag <input_path> [options]"
