@@ -1,0 +1,10 @@
+# Data folders
+data/
+data_mcap/
+
+# Virtual Environment
+.venv/
+
+# Binary artifacts
+*.bag
+*.mcap

@@ -23,8 +23,8 @@ services:
     container_name: bag_converter_runner
     restart: "no"
     user: "${CURRENT_UID:-1000}:${CURRENT_GID:-1000}"
+    working_dir: /data
     volumes:
       - ./convert.py:/home/dev/convert.py
-      # We only need one data volume now
       - ${HOST_DATA_DIR:-.}:/data
     command: python3 /home/dev/convert.py --help

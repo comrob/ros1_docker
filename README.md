@@ -1,6 +1,24 @@
 # ROS1 -> ROS2 (mcap) Bag Conversion
 
 ![ROS Logo](https://github.com/comrob/github-media/blob/main/img/image.png?raw=true)
+
+## Quick Start (Demo)
+
+We provide a demo script that **automatically downloads test bagfiles** and runs the conversion logic for you. + The script opens converted file in [foxglove](https://foxglove.dev/download) if it is installed.
+
+```bash
+# 1. Build the image
+docker compose build converter
+
+# 2. Run the demo (downloads data -> converts -> verifies)
+./run_demo.sh
+
+```
+
+*Prefer to test manually? You can download the sample split-bag dataset from [Google Drive here](https://drive.google.com/drive/folders/18X8cS0u-40FkafMt82_sUuik2VwluMv8?usp=drive_link).*
+
+---
+
 ## TL;DR
 ```
 docker compose build converter

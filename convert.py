@@ -492,7 +492,10 @@ def main():
             output_dir.mkdir(parents=True, exist_ok=True)
         else:
             output_dir = None
-
+    
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
     # --- 3. Execution ---
     converter = BagSeriesConverter(ros_distro=args.distro)
     
