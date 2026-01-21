@@ -1,6 +1,5 @@
 import sys
 import argparse
-import yaml
 import traceback
 import time
 from pathlib import Path
@@ -18,74 +17,6 @@ import convert_utils
 import writer as mcap_writer_utils
 
 from plugin_manager import PluginManager
-
-# --- Metadata Logic ---
-def write_metadata_yaml(folder: Path, stats_list: List[Dict], distro: str):
-    try:
-        if not stats_list: return
-
-        print(f"[INFO] Generating metadata.yaml for {len(stats_list)} files...")
-        total_messages = 0
-        min_start = None
-        max_end = None
-        merged_topics = {}
-        files_data = []
-
-        for s in stats_list:
-            if min_start is None or s['start_time'] < min_start: min_start = s['start_time']
-            if max_end is None or s['end_time'] > max_end: max_end = s['end_time']
-            total_messages += s['message_count']
-
-            for t_name, t_info in s['topics'].items():
-                if t_name not in merged_topics:
-                    merged_topics[t_name] = t_info.copy()
-                else:
-                    merged_topics[t_name]['count'] += t_info['count']
-
-            files_data.append({
-                "path": s['filename'],
-                "starting_time": {"nanoseconds_since_epoch": s['start_time']},
-                "duration": {"nanoseconds": s['duration']},
-                "message_count": s['message_count']
-            })
-
-        duration_ns = (max_end - min_start) if (max_end and min_start) else 0
-
-        topics_list = []
-        for t_name, t_data in merged_topics.items():
-            topics_list.append({
-                "topic_metadata": {
-                    "name": t_name,
-                    "type": t_data['type'],
-                    "serialization_format": "cdr",
-                    "offered_qos_profiles": ""
-                },
-                "message_count": t_data['count']
-            })
-
-        metadata = {
-            "rosbag2_bagfile_information": {
-                "version": 5,
-                "storage_identifier": "mcap",
-                "ros_distro": distro,
-                "relative_file_paths": [f['path'] for f in files_data],
-                "duration": {"nanoseconds": duration_ns},
-                "starting_time": {"nanoseconds_since_epoch": min_start if min_start else 0},
-                "message_count": total_messages,
-                "topics_with_message_count": topics_list,
-                "compression_format": "",
-                "compression_mode": "",
-                "files": files_data
-            }
-        }
-
-        yaml_path = folder / "metadata.yaml"
-        with open(yaml_path, "w") as f:
-            yaml.dump(metadata, f, default_flow_style=False)
-        print(f"[SUCCESS] Metadata written to {yaml_path}")
-
-    except Exception as e:
-        print(f"[ERR] Failed to generate metadata.yaml: {e}")
 
 # --- Business Logic ---
 class BagSeriesConverter:
@@ -119,7 +50,9 @@ class BagSeriesConverter:
             
             # Setup first stats object
             current_stats = {
+                "source_bag": src.name, 
                 "filename": writer.current_file_path.name,
+                "output_path": writer.current_file_path, 
                 "start_time": None, "end_time": None,
                 "message_count": 0, "topics": {}
             }
@@ -131,7 +64,6 @@ class BagSeriesConverter:
             
             try:
                 # --- PASS 1: REGISTRATION ---
-                # This pass is usually fast, no progress bar needed
                 for conn in reader.connections:
                     if self.exiter.stop_requested: break
 
@@ -230,15 +162,11 @@ class BagSeriesConverter:
                             current_stats["message_count"] += 1
 
                 # --- PASS 2: CONVERSION (With Progress Bar) ---
-                
-                # Calculate total duration for the progress bar
                 start_ns = reader.start_time or 0
                 end_ns = reader.end_time or 0
                 total_duration_sec = (end_ns - start_ns) / 1e9
-                
                 last_ts = start_ns
 
-                # Initialize tqdm with seconds
                 with tqdm(
                     total=total_duration_sec, 
                     unit="s", 
@@ -251,8 +179,6 @@ class BagSeriesConverter:
                         if self.exiter.stop_requested: break
                         if conn.id not in conn_map: continue
                         
-                        # UPDATE PROGRESS BAR
-                        # Calculate step in seconds
                         step = (timestamp - last_ts) / 1e9
                         if step > 0:
                             pbar.update(step)
@@ -263,7 +189,14 @@ class BagSeriesConverter:
                             if current_stats["end_time"] is None: current_stats["end_time"] = 0
                             current_stats["duration"] = current_stats["end_time"] - current_stats["start_time"]
                             all_file_stats.append(current_stats)
-                            current_stats = { "filename": writer.current_file_path.name, "start_time": timestamp, "end_time": timestamp, "message_count": 0, "topics": {} }
+                            
+                            current_stats = { 
+                                "source_bag": src.name, 
+                                "filename": writer.current_file_path.name,
+                                "output_path": writer.current_file_path, 
+                                "start_time": timestamp, "end_time": timestamp, 
+                                "message_count": 0, "topics": {} 
+                            }
                             writer.just_rotated = False
 
                         ros2_t = type_map[conn.id]
@@ -297,9 +230,7 @@ class BagSeriesConverter:
                             if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
                         
                         except Exception as e:
-                            # Use tqdm.write to avoid breaking the progress bar layout
                             tqdm.write(f"[ERR] Conversion failed on topic {conn.topic} ({ros2_t}):")
-                            # traceback.print_exc() # Optional: noisy
 
                 print(f"  [SUCCESS] {current_stats.get('message_count', 0)} messages converted.")
 
@@ -351,7 +282,6 @@ def main():
         first_file = bag_files[0]
         if args.series:
             stem = first_file.stem
-            # Simple heuristic for folder output naming
             if len(input_paths) == 1 and input_paths[0].is_dir():
                 parent_name = first_file.parent.name
                 output_dir = first_file.parent.parent / f"{parent_name}_mcap"
@@ -387,8 +317,11 @@ def main():
             converter.static_tf_cache.clear()
             converter.tf_static_def = None
 
+    # --- Use the utils functions ---
     if output_dir and valid_stats:
-        write_metadata_yaml(output_dir, valid_stats, args.distro)
+        convert_utils.write_metadata_yaml(output_dir, valid_stats, args.distro)
+    
+    convert_utils.print_and_save_summary(valid_stats, output_dir)
 
 if __name__ == "__main__":
     main()

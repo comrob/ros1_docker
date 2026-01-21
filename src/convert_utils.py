@@ -1,8 +1,11 @@
 import sys
 import re
 import signal
+import yaml
+import os
 import numpy as np
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Optional, List, Dict
 
 # Constants
 TF_STATIC_TOPIC = '/tf_static'
@@ -17,6 +20,153 @@ TF_STATIC_QOS_POLICY = """
   liveliness_lease_duration: {sec: 2147483647, nsec: 4294967295}
   avoid_ros_namespace_conventions: false
 """.strip()
+
+# --- Reporting / Metadata Utils ---
+
+def write_metadata_yaml(folder: Path, stats_list: List[Dict], distro: str):
+    """Generates the metadata.yaml required for ROS2 playback."""
+    try:
+        if not stats_list: return
+
+        print(f"[INFO] Generating metadata.yaml for {len(stats_list)} files...")
+        total_messages = 0
+        min_start = None
+        max_end = None
+        merged_topics = {}
+        files_data = []
+
+        for s in stats_list:
+            if min_start is None or s['start_time'] < min_start: min_start = s['start_time']
+            if max_end is None or s['end_time'] > max_end: max_end = s['end_time']
+            total_messages += s['message_count']
+
+            for t_name, t_info in s['topics'].items():
+                if t_name not in merged_topics:
+                    merged_topics[t_name] = t_info.copy()
+                else:
+                    merged_topics[t_name]['count'] += t_info['count']
+
+            files_data.append({
+                "path": s['filename'],
+                "starting_time": {"nanoseconds_since_epoch": s['start_time']},
+                "duration": {"nanoseconds": s['duration']},
+                "message_count": s['message_count']
+            })
+
+        duration_ns = (max_end - min_start) if (max_end and min_start) else 0
+
+        topics_list = []
+        for t_name, t_data in merged_topics.items():
+            topics_list.append({
+                "topic_metadata": {
+                    "name": t_name,
+                    "type": t_data['type'],
+                    "serialization_format": "cdr",
+                    "offered_qos_profiles": ""
+                },
+                "message_count": t_data['count']
+            })
+
+        metadata = {
+            "rosbag2_bagfile_information": {
+                "version": 5,
+                "storage_identifier": "mcap",
+                "ros_distro": distro,
+                "relative_file_paths": [f['path'] for f in files_data],
+                "duration": {"nanoseconds": duration_ns},
+                "starting_time": {"nanoseconds_since_epoch": min_start if min_start else 0},
+                "message_count": total_messages,
+                "topics_with_message_count": topics_list,
+                "compression_format": "",
+                "compression_mode": "",
+                "files": files_data
+            }
+        }
+
+        yaml_path = folder / "metadata.yaml"
+        with open(yaml_path, "w") as f:
+            yaml.dump(metadata, f, default_flow_style=False)
+        print(f"[SUCCESS] Metadata written to {yaml_path}")
+
+    except Exception as e:
+        print(f"[ERR] Failed to generate metadata.yaml: {e}")
+
+def print_and_save_summary(stats_list: List[Dict], output_folder: Optional[Path]):
+    """Prints a table summary and saves it to TXT and YAML files."""
+    if not stats_list:
+        return
+
+    host_mount = os.environ.get("HOST_DATA_DIR")
+    summary_data_for_yaml = []
+    
+    # Prepare text lines
+    lines = []
+    lines.append("="*120)
+    lines.append(f"{'CONVERSION SUMMARY':^120}")
+    lines.append("="*120)
+    header = f"{'Source Input':<25} | {'Output File':<25} | {'Msgs':<10} | {'Full Output Path (Host)':<50}"
+    lines.append(header)
+    lines.append("-" * 120)
+
+    for s in stats_list:
+        src_name = s.get('source_bag', 'Unknown')
+        out_name = s.get('filename', 'Unknown')
+        msg_count = s.get('message_count', 0)
+        
+        # Resolve Host Path
+        output_path_str = str(s.get('output_path', ''))
+        display_path = output_path_str
+
+        if host_mount and output_path_str:
+            p = Path(output_path_str)
+            try:
+                if p.is_absolute():
+                     rel = p.relative_to(Path.cwd())
+                     final_host_path = Path(host_mount) / rel
+                else:
+                     final_host_path = Path(host_mount) / p
+                
+                display_path = str(final_host_path)
+            except ValueError:
+                pass 
+
+        # Add to Text Report
+        lines.append(f"{src_name:<25} | {out_name:<25} | {msg_count:<10} | {display_path}")
+
+        # Add to YAML Data
+        summary_data_for_yaml.append({
+            "source_input": src_name,
+            "output_file": out_name,
+            "message_count": msg_count,
+            "host_path": display_path,
+            "duration_sec": float(s.get("duration", 0)) / 1e9
+        })
+
+    lines.append("="*120 + "\n")
+
+    # 1. Print to Console
+    print("\n".join(lines))
+
+    # 2. Save Files
+    if output_folder and output_folder.exists():
+        # Save TXT
+        txt_path = output_folder / "conversion_summary.txt"
+        try:
+            with open(txt_path, "w") as f:
+                f.write("\n".join(lines))
+        except Exception as e:
+            print(f"[WARN] Could not save summary TXT: {e}")
+
+        # Save YAML
+        yaml_path = output_folder / "conversion_summary.yaml"
+        try:
+            with open(yaml_path, "w") as f:
+                yaml.dump({"conversions": summary_data_for_yaml}, f, sort_keys=False)
+            print(f"[INFO] Summaries saved to:\n       - {txt_path}\n       - {yaml_path}")
+        except Exception as e:
+            print(f"[WARN] Could not save summary YAML: {e}")
+
+# --- Core Utilities ---
 
 class GracefulExiter:
     def __init__(self):
@@ -42,7 +192,6 @@ def to_ros2_type(ros1_type: str) -> str:
     return ros1_type
 
 def fix_ros1_def(text: str, type_name: str) -> str:
-    """Parses ROS1 definitions line-by-line to safely convert types to ROS2."""
     if "CameraInfo" in type_name:
         text = text.replace("float64[] D", "float64[] d")
         text = text.replace("float64[9] K", "float64[9] k")
