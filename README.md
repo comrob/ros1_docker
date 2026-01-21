@@ -109,12 +109,8 @@ The system uses a **hook-based architecture**:
 Plugins are managed via `src/plugins.yaml`.
 
 ```yaml
-plugins:
-  debayer:
-    enabled: true
-    params:
-      topic_pattern: "/camera/image_raw"
-
+active_plugins:
+  - DebayerPlugin
 ```
 
 <details>
