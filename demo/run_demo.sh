@@ -189,6 +189,31 @@ else
 fi
 
 # ==============================================================================
+# STEP 9: TEST CASE: Dry Run
+# ==============================================================================
+print_header "STEP 9: Testing Dry Run Mode"
+OUT_DRY="$OUTPUT_DIR/case6_dryrun"
+
+# We run with --dry-run. This should NOT produce files, but should exit with 0.
+set -x
+$CONVERTER_SCRIPT "$INPUT_SEQ" --series --out-dir "$OUT_DRY" --dry-run
+set +x
+
+if [ ! -d "$OUT_DRY" ]; then
+    echo "✅ Success: Dry run finished without creating output folders/files."
+else
+    # It might create the folder if the script pre-creates it?
+    # Actually convert.py creates output_dir AFTER dry run check.
+    # So the folder should NOT exist.
+    if [ -z "$(ls -A $OUT_DRY 2>/dev/null)" ]; then
+         echo "✅ Success: Output folder is empty or non-existent."
+    else
+         echo "❌ Failure: Dry run created files!"
+         exit 1
+    fi
+fi
+
+# ==============================================================================
 # STEP 8: VISUALIZATION
 # ==============================================================================
 print_header "STEP 8: Done"

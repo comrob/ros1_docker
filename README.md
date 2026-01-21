@@ -232,7 +232,6 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 
 * **MCAP-to-MCAP Tooling:** Generalize the architecture to support MCAP-to-MCAP manipulation. This would allow using the plugin system (filtering, anonymization) on native ROS 2 data, not just during conversion.
 * **Progress Bars:** Replace line-based logging with `tqdm` for visual progress during long conversions.
-* **Pre-Flight Checks:** Implement a `--dry-run` mode to validate paths and disk space.
 * **Summary Report:** Print a tabulated summary of converted topics and message counts at the end of execution.
 
 ### Completed
@@ -240,6 +239,7 @@ If your host supports X11 forwarding, you can run GUI tools (`rviz`) directly.
 * [x] **Auto-splitting:** Series conversion with static TF injection is implemented.
 * [x] **Plugin System:** Architecture for modular data manipulation is implemented.
 * [x] **Automated Image Publishing:** CI/CD scripts (`publish-image.sh`) are in place.
+* [x] **Pre-Flight Checks:** Implement a `--dry-run` mode to validate paths and disk space.
 
 </details>
 

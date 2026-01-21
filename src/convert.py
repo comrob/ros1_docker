@@ -1,4 +1,5 @@
 import sys
+import os
 import argparse
 import traceback
 import time
@@ -25,21 +26,29 @@ class BagSeriesConverter:
         self.static_tf_cache: List[Any] = []
         self.tf_static_def: Optional[str] = None 
         
+        # Delayed initialization for Dry Run (we don't need stores just to check paths)
+        self.store_ros1 = None
+        self.store_ros2 = None
+        self.exiter = convert_utils.GracefulExiter()
+        
+        self.plugin_dir = Path(__file__).parent / "plugins"
+        self.plugin_config_path = None
+        if enable_plugins:
+            self.plugin_config_path = Path(__file__).parent / "plugins.yaml"
+        
+        # Manager is lightweight, can init early
+        self.plugin_manager = PluginManager(self.plugin_dir, self.plugin_config_path)
+
+    def init_stores(self):
+        """Heavy initialization, skip during dry run."""
         print(f"[INFO] Initializing Stores...")
         self.store_ros1 = get_typestore(Stores.ROS1_NOETIC)
         self.store_ros2 = get_typestore(Stores.ROS2_HUMBLE)
-        self.exiter = convert_utils.GracefulExiter()
-
-        # --- PLUGIN LOGIC START ---
-        plugin_dir = Path(__file__).parent / "plugins"
-        config_path = None
-
-        if enable_plugins:
-            config_path = Path(__file__).parent / "plugins.yaml"
-
-        self.plugin_manager = PluginManager(plugin_dir, config_path)
 
     def convert_file(self, src: Path, base_dst: Path, split_size: int = 0, is_part_of_series: bool = False) -> List[Dict]:
+        # Ensure stores are loaded
+        if not self.store_ros1: self.init_stores()
+
         print(f"[INFO] Processing: {src.name}")
         
         tf_type_name = "tf2_msgs/msg/TFMessage"
@@ -161,7 +170,7 @@ class BagSeriesConverter:
                             current_stats["topics"][convert_utils.TF_STATIC_TOPIC]["count"] += 1
                             current_stats["message_count"] += 1
 
-                # --- PASS 2: CONVERSION (With Progress Bar) ---
+                # --- PASS 2: CONVERSION ---
                 start_ns = reader.start_time or 0
                 end_ns = reader.end_time or 0
                 total_duration_sec = (end_ns - start_ns) / 1e9
@@ -253,6 +262,9 @@ def main():
     parser.add_argument("--split-size", default=None, help="Split output files by size (e.g., 3G, 500M)")
     parser.add_argument("--with-plugins", action="store_true", help="Enable custom processing plugins from plugins.yaml")
     
+    # NEW ARGUMENT
+    parser.add_argument("--dry-run", action="store_true", help="Validate paths and config without running conversion")
+
     args = parser.parse_args()
     
     try:
@@ -275,8 +287,7 @@ def main():
         print("[ERR] No .bag files found.")
         sys.exit(1)
 
-    print(f"[INFO] Processing {len(bag_files)} files. Series Mode: {args.series}")
-    
+    # Output Dir Logic
     output_dir = args.out_dir
     if output_dir is None:
         first_file = bag_files[0]
@@ -287,12 +298,77 @@ def main():
                 output_dir = first_file.parent.parent / f"{parent_name}_mcap"
             else:
                 output_dir = first_file.parent / f"{stem}_series_mcap"
-            print(f"[INFO] Output Directory: {output_dir}")
         else:
-            output_dir = None
+            output_dir = None # Will output alongside input file
+    
+    # --- DRY RUN MODE ---
+    if args.dry_run:
+        print("\n" + "="*80)
+        print(f"{'DRY RUN: PRE-FLIGHT CHECK':^80}")
+        print("="*80)
+        
+        # 1. Configuration
+        print(f"{'Configuration':<20} | {'Status':<50}")
+        print("-" * 80)
+        print(f"{'Series Mode':<20} | {args.series}")
+        print(f"{'Split Size':<20} | {args.split_size if args.split_size else 'None'}")
+        print(f"{'Plugins':<20} | {args.with_plugins}")
+        
+        # 2. Input Validation
+        print(f"\n{'Input Files':<20} | {'Status':<50}")
+        print("-" * 80)
+        all_inputs_ok = True
+        for b in bag_files:
+            readable = os.access(b, os.R_OK)
+            status = "✅ Readable" if readable else "❌ UNREADABLE (Check permissions)"
+            print(f"{b.name:<20} | {status}")
+            if not readable: all_inputs_ok = False
+            
+        # 3. Output Validation
+        print(f"\n{'Output Target':<20} | {'Path Info':<50}")
+        print("-" * 80)
+        
+        # Determine actual container target
+        container_target = output_dir if output_dir else bag_files[0].parent
+        
+        # Determine Host Path (for display)
+        host_mount = os.environ.get("HOST_DATA_DIR")
+        display_path = str(container_target)
+        if host_mount:
+            try:
+                if container_target.is_absolute():
+                     rel = container_target.relative_to(Path.cwd())
+                     display_path = str(Path(host_mount) / rel)
+            except ValueError: pass
+
+        print(f"{'Container Path':<20} | {container_target}")
+        print(f"{'Host Path':<20} | {display_path}")
+        
+        # Check Write Permissions
+        # Scan up until we find a directory that exists
+        check_target = container_target
+        while not check_target.exists():
+            check_target = check_target.parent
+            
+        writable = os.access(check_target, os.W_OK)
+        write_status = "✅ Writable" if writable else "❌ NOT WRITABLE"
+        print(f"{'Write Access':<20} | {write_status}")
+
+        print("\n" + "="*80)
+        
+        if all_inputs_ok and writable:
+            print("RESULT: ✅ All checks passed. Ready to convert.")
+            sys.exit(0)
+        else:
+            print("RESULT: ❌ Checks failed. Please fix permissions or paths.")
+            sys.exit(1)
+
+    # --- EXECUTION ---
+    print(f"[INFO] Processing {len(bag_files)} files. Series Mode: {args.series}")
     
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Output Directory: {output_dir}")
     
     converter = BagSeriesConverter(ros_distro=args.distro, enable_plugins=args.with_plugins)
     valid_stats = []
@@ -317,7 +393,6 @@ def main():
             converter.static_tf_cache.clear()
             converter.tf_static_def = None
 
-    # --- Use the utils functions ---
     if output_dir and valid_stats:
         convert_utils.write_metadata_yaml(output_dir, valid_stats, args.distro)
     
