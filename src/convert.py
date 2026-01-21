@@ -2,8 +2,11 @@ import sys
 import argparse
 import yaml
 import traceback
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Any
+
+from tqdm import tqdm
 
 # ROS / MCAP
 from rosbags.rosbag1 import Reader
@@ -86,7 +89,6 @@ def write_metadata_yaml(folder: Path, stats_list: List[Dict], distro: str):
 
 # --- Business Logic ---
 class BagSeriesConverter:
-    # 1. Update signature to accept enable_plugins
     def __init__(self, ros_distro="humble", enable_plugins=False):
         self.ros_distro = ros_distro
         self.static_tf_cache: List[Any] = []
@@ -101,13 +103,9 @@ class BagSeriesConverter:
         plugin_dir = Path(__file__).parent / "plugins"
         config_path = None
 
-        # Only set config_path if the flag is True
         if enable_plugins:
-            # You mentioned the yaml is in the 'src' folder (same as this script)
             config_path = Path(__file__).parent / "plugins.yaml"
 
-        # Initialize Manager
-        # If config_path is None, it prints "no plugins applied" (as per your previous request)
         self.plugin_manager = PluginManager(plugin_dir, config_path)
 
     def convert_file(self, src: Path, base_dst: Path, split_size: int = 0, is_part_of_series: bool = False) -> List[Dict]:
@@ -133,6 +131,7 @@ class BagSeriesConverter:
             
             try:
                 # --- PASS 1: REGISTRATION ---
+                # This pass is usually fast, no progress bar needed
                 for conn in reader.connections:
                     if self.exiter.stop_requested: break
 
@@ -226,68 +225,83 @@ class BagSeriesConverter:
                                 for t in ros2_msg.transforms:
                                     t.header.stamp = Time(sec=int(start_time/1e9), nanosec=int(start_time%1e9))
                             cdr_bytes = self.store_ros2.serialize_cdr(ros2_msg, tf_type_name)
-                            
-                            # FIX 1: Explicit cast to int() for start_time
                             writer.add_message(channel_id=chan_id, log_time=int(start_time), publish_time=int(start_time), data=cdr_bytes)
-                            
                             current_stats["topics"][convert_utils.TF_STATIC_TOPIC]["count"] += 1
                             current_stats["message_count"] += 1
 
-                # --- PASS 2: CONVERSION ---
-                print("  [INFO] Converting messages...")
-                stats_count_total = 0
+                # --- PASS 2: CONVERSION (With Progress Bar) ---
                 
-                for conn, timestamp, raw_data in reader.messages():
-                    if self.exiter.stop_requested: break
-                    if conn.id not in conn_map: continue
-                    
-                    if writer.just_rotated:
-                        if current_stats["start_time"] is None: current_stats["start_time"] = 0
-                        if current_stats["end_time"] is None: current_stats["end_time"] = 0
-                        current_stats["duration"] = current_stats["end_time"] - current_stats["start_time"]
-                        all_file_stats.append(current_stats)
-                        current_stats = { "filename": writer.current_file_path.name, "start_time": timestamp, "end_time": timestamp, "message_count": 0, "topics": {} }
-                        writer.just_rotated = False
+                # Calculate total duration for the progress bar
+                start_ns = reader.start_time or 0
+                end_ns = reader.end_time or 0
+                total_duration_sec = (end_ns - start_ns) / 1e9
+                
+                last_ts = start_ns
 
-                    ros2_t = type_map[conn.id]
-                    try:
-                        ros1_msg = self.store_ros1.deserialize_ros1(raw_data, conn.msgtype)
-                        ros2_msg = convert_utils.convert_ros1_to_ros2(ros1_msg, ros2_t, self.store_ros2)
+                # Initialize tqdm with seconds
+                with tqdm(
+                    total=total_duration_sec, 
+                    unit="s", 
+                    desc="Converting", 
+                    leave=False,
+                    bar_format="{l_bar}{bar}| {n:.2f}/{total:.2f}s [{elapsed}<{remaining}, {rate_fmt}]"
+                ) as pbar:
+
+                    for conn, timestamp, raw_data in reader.messages():
+                        if self.exiter.stop_requested: break
+                        if conn.id not in conn_map: continue
                         
-                        ros2_msg = self.plugin_manager.run_plugins(conn.topic, ros2_msg, ros2_t)
-                        if ros2_msg is None: continue
+                        # UPDATE PROGRESS BAR
+                        # Calculate step in seconds
+                        step = (timestamp - last_ts) / 1e9
+                        if step > 0:
+                            pbar.update(step)
+                            last_ts = timestamp
                         
-                        cdr_bytes = self.store_ros2.serialize_cdr(ros2_msg, ros2_t)
+                        if writer.just_rotated:
+                            if current_stats["start_time"] is None: current_stats["start_time"] = 0
+                            if current_stats["end_time"] is None: current_stats["end_time"] = 0
+                            current_stats["duration"] = current_stats["end_time"] - current_stats["start_time"]
+                            all_file_stats.append(current_stats)
+                            current_stats = { "filename": writer.current_file_path.name, "start_time": timestamp, "end_time": timestamp, "message_count": 0, "topics": {} }
+                            writer.just_rotated = False
 
-                        # FIX 2: Explicit cast to int() for timestamp
-                        writer.add_message(
-                            channel_id=conn_map[conn.id],
-                            log_time=int(timestamp),
-                            publish_time=int(timestamp),
-                            data=cdr_bytes
-                        )
+                        ros2_t = type_map[conn.id]
+                        try:
+                            ros1_msg = self.store_ros1.deserialize_ros1(raw_data, conn.msgtype)
+                            ros2_msg = convert_utils.convert_ros1_to_ros2(ros1_msg, ros2_t, self.store_ros2)
+                            
+                            ros2_msg = self.plugin_manager.run_plugins(conn.topic, ros2_msg, ros2_t)
+                            if ros2_msg is None: continue
+                            
+                            cdr_bytes = self.store_ros2.serialize_cdr(ros2_msg, ros2_t)
 
-                        if conn.topic == convert_utils.TF_STATIC_TOPIC:
-                            self.static_tf_cache.append(ros2_msg)
+                            writer.add_message(
+                                channel_id=conn_map[conn.id],
+                                log_time=int(timestamp),
+                                publish_time=int(timestamp),
+                                data=cdr_bytes
+                            )
+
+                            if conn.topic == convert_utils.TF_STATIC_TOPIC:
+                                self.static_tf_cache.append(ros2_msg)
+                            
+                            t_name = conn.topic
+                            if t_name not in current_stats["topics"]:
+                                current_stats["topics"][t_name] = {"count": 0, "type": ros2_t}
+
+                            current_stats["topics"][t_name]["count"] += 1
+                            current_stats["message_count"] += 1
+                            
+                            if current_stats["start_time"] is None or timestamp < current_stats["start_time"]: current_stats["start_time"] = timestamp
+                            if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
                         
-                        t_name = conn.topic
-                        if t_name not in current_stats["topics"]:
-                             current_stats["topics"][t_name] = {"count": 0, "type": ros2_t}
+                        except Exception as e:
+                            # Use tqdm.write to avoid breaking the progress bar layout
+                            tqdm.write(f"[ERR] Conversion failed on topic {conn.topic} ({ros2_t}):")
+                            # traceback.print_exc() # Optional: noisy
 
-                        current_stats["topics"][t_name]["count"] += 1
-                        current_stats["message_count"] += 1
-                        stats_count_total += 1
-                        
-                        if current_stats["start_time"] is None or timestamp < current_stats["start_time"]: current_stats["start_time"] = timestamp
-                        if current_stats["end_time"] is None or timestamp > current_stats["end_time"]: current_stats["end_time"] = timestamp
-
-                        if stats_count_total % 10000 == 0: print(f"         {stats_count_total}...", end='\r')
-                    
-                    except Exception as e:
-                        print(f"\n[ERR] Conversion failed on topic {conn.topic} ({ros2_t}):")
-                        traceback.print_exc()
-
-                print(f"\n  [SUCCESS] {stats_count_total} messages converted.")
+                print(f"  [SUCCESS] {current_stats.get('message_count', 0)} messages converted.")
 
             finally:
                 writer.finish()

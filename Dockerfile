@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install conversion libs
-RUN pip3 install rosbags mcap-ros2-support zstandard
+RUN pip3 install rosbags mcap-ros2-support zstandard tqdm
 
 # 3. Create user
 ARG USERNAME=dev
@@ -29,7 +29,7 @@ RUN echo "source /opt/ros/noetic/setup.bash" >> /home/$USERNAME/.bashrc
 RUN echo "source /home/$USERNAME/catkin_ws/devel/setup.bash" >> /home/$USERNAME/.bashrc
 
 # This ensures the script is always available inside the container at a known path.
-COPY --chown=$USERNAME:$USERNAME convert.py /home/$USERNAME/convert.py
+COPY --chown=$USERNAME:$USERNAME src/ /home/$USERNAME/src/
 
 # 5. Entrypoint
 USER $USERNAME
