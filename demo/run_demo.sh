@@ -21,6 +21,7 @@ CONVERTER_SCRIPT="../convert_bag.sh"  # Now safely points to parent of SCRIPT_DI
 ID_BAG_0="1u-dvvvne-OXfz2YMDGVg2FBtSolf2pNk"
 ID_BAG_1="1TQjpWbwi5CyzFpfE1lIxQR-w3Q16340K"
 ID_BAG_2="1xlR7QFL9wKGkANAENt3HxEPX7KY2IbMH"
+ID_BAG_DEBAYER="15EIfn-Y8oaYU2eOhSZITvcI_6zjbaOC6" # New Bag for Plugin Test
 ID_LAYOUT="15DyLCDZd7rhZ3nwSuKCv-ZdzOwjEyt6H"
 
 # --- Helper Functions ---
@@ -75,6 +76,7 @@ mkdir -p "$DATA_DIR"
 download_if_missing "$ID_BAG_0" "$DATA_DIR/test_0.bag"
 download_if_missing "$ID_BAG_1" "$DATA_DIR/test_1.bag"
 download_if_missing "$ID_BAG_2" "$DATA_DIR/test_2.bag"
+download_if_missing "$ID_BAG_DEBAYER" "$DATA_DIR/test_debayer.bag" # Download the new bag
 download_if_missing "$ID_LAYOUT" "$DATA_DIR/$LAYOUT_FILE"
 
 # ==============================================================================
@@ -137,23 +139,13 @@ else
 fi
 
 # ==============================================================================
-# STEP 6: VISUALIZATION
+# STEP 6: TEST CASE: Splitting by Size
 # ==============================================================================
-print_header "STEP 6: Launching Foxglove Studio"
-echo "Instructions:"
-echo "1. Import layout: '$SCRIPT_DIR/$DATA_DIR/$LAYOUT_FILE'"
-echo "2. Drag the folder '$SCRIPT_DIR/$OUT_FOLDER' into Foxglove."
-
-
-# ==============================================================================
-# STEP 7: TEST CASE: Splitting by Size
-# ==============================================================================
-print_header "STEP 7: Testing Split Size (Limit 50MB)" # CHANGED from 200MB
+print_header "STEP 6: Testing Split Size (Limit 50MB)"
 
 OUT_SPLIT="$DATA_DIR/output_split"
 echo "[INFO] Target Output: $OUT_SPLIT"
 
-# Clean up previous failed run if exists
 rm -rf "$OUT_SPLIT"
 
 set -x
@@ -168,9 +160,40 @@ else
     exit 1
 fi
 
+# ==============================================================================
+# STEP 7: TEST CASE: Plugin Functionality (Debayer)
+# ==============================================================================
+print_header "STEP 7: Testing Plugin Functionality (Debayer)"
+
+OUT_PLUGIN="$DATA_DIR/output_plugin_debayer"
+echo "[INFO] Target Output: $OUT_PLUGIN"
+
+# Clean up previous
+rm -rf "$OUT_PLUGIN"
+
+set -x
+# Passing --with-plugins to activate the DebayerPlugin
+$CONVERTER_SCRIPT "$DATA_DIR/test_debayer.bag" --out-dir "$OUT_PLUGIN" --with-plugins
+set +x
+
+if [ -f "$OUT_PLUGIN/test_debayer.mcap" ]; then
+    echo "✅ Plugin conversion successful."
+    echo "   (Please verify the colors are correct in Foxglove)"
+else
+    echo "❌ Failed. Plugin output missing in: $OUT_PLUGIN"
+    exit 1
+fi
+
+# ==============================================================================
+# STEP 8: VISUALIZATION
+# ==============================================================================
+print_header "STEP 8: Launching Foxglove Studio"
+echo "Instructions:"
+echo "1. Import layout: '$SCRIPT_DIR/$DATA_DIR/$LAYOUT_FILE'"
+echo "2. Drag the folder '$SCRIPT_DIR/$OUT_PLUGIN' (or others) into Foxglove."
+
 if command -v foxglove-studio &> /dev/null; then
-    # Open the first file to trigger the app, but drag-and-drop folder is best for sequence
-    foxglove-studio "$OUT_FOLDER/test_1.mcap" &
+    foxglove-studio "$OUT_PLUGIN/test_debayer.mcap" &
 else
     echo "[INFO] Foxglove not found in PATH. Please open manually."
 fi

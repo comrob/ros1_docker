@@ -14,6 +14,8 @@ from mcap.well_known import SchemaEncoding, MessageEncoding, Profile
 import convert_utils
 import writer as mcap_writer_utils
 
+from plugin_manager import PluginManager
+
 # --- Metadata Logic ---
 def write_metadata_yaml(folder: Path, stats_list: List[Dict], distro: str):
     try:
@@ -84,7 +86,8 @@ def write_metadata_yaml(folder: Path, stats_list: List[Dict], distro: str):
 
 # --- Business Logic ---
 class BagSeriesConverter:
-    def __init__(self, ros_distro="humble"):
+    # 1. Update signature to accept enable_plugins
+    def __init__(self, ros_distro="humble", enable_plugins=False):
         self.ros_distro = ros_distro
         self.static_tf_cache: List[Any] = []
         self.tf_static_def: Optional[str] = None 
@@ -93,6 +96,19 @@ class BagSeriesConverter:
         self.store_ros1 = get_typestore(Stores.ROS1_NOETIC)
         self.store_ros2 = get_typestore(Stores.ROS2_HUMBLE)
         self.exiter = convert_utils.GracefulExiter()
+
+        # --- PLUGIN LOGIC START ---
+        plugin_dir = Path(__file__).parent / "plugins"
+        config_path = None
+
+        # Only set config_path if the flag is True
+        if enable_plugins:
+            # You mentioned the yaml is in the 'src' folder (same as this script)
+            config_path = Path(__file__).parent / "plugins.yaml"
+
+        # Initialize Manager
+        # If config_path is None, it prints "no plugins applied" (as per your previous request)
+        self.plugin_manager = PluginManager(plugin_dir, config_path)
 
     def convert_file(self, src: Path, base_dst: Path, split_size: int = 0, is_part_of_series: bool = False) -> List[Dict]:
         print(f"[INFO] Processing: {src.name}")
@@ -237,6 +253,10 @@ class BagSeriesConverter:
                     try:
                         ros1_msg = self.store_ros1.deserialize_ros1(raw_data, conn.msgtype)
                         ros2_msg = convert_utils.convert_ros1_to_ros2(ros1_msg, ros2_t, self.store_ros2)
+                        
+                        ros2_msg = self.plugin_manager.run_plugins(conn.topic, ros2_msg, ros2_t)
+                        if ros2_msg is None: continue
+                        
                         cdr_bytes = self.store_ros2.serialize_cdr(ros2_msg, ros2_t)
 
                         # FIX 2: Explicit cast to int() for timestamp
@@ -286,7 +306,8 @@ def main():
     parser.add_argument("--distro", default="humble", help="ROS distro for metadata")
     parser.add_argument("--out-dir", type=Path, default=None, help="Force a specific output directory")
     parser.add_argument("--split-size", default=None, help="Split output files by size (e.g., 3G, 500M)")
-
+    parser.add_argument("--with-plugins", action="store_true", help="Enable custom processing plugins from plugins.yaml")
+    
     args = parser.parse_args()
     
     try:
@@ -329,7 +350,7 @@ def main():
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
     
-    converter = BagSeriesConverter(ros_distro=args.distro)
+    converter = BagSeriesConverter(ros_distro=args.distro, enable_plugins=args.with_plugins)
     valid_stats = []
 
     for f in bag_files:

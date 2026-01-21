@@ -1,0 +1,5 @@
+# plugins.yaml
+active_plugins:
+  # - DebayerDebugPlugin
+  - DebayerPlugin
+  # - CircleDrawerPlugin  <-- You can comment this out to disable it
