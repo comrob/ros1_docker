@@ -30,6 +30,8 @@ class BagSeriesConverter:
         self.store_ros2 = None
         self.exiter = convert_utils.GracefulExiter()
         
+        self.current_topic_errors = {}
+        
         self.plugin_dir = Path(__file__).parent / "plugins"
         self.plugin_config_path = None
         if enable_plugins:
@@ -46,31 +48,34 @@ class BagSeriesConverter:
         if not self.store_ros1: self.init_stores()
 
         print(f"[INFO] Processing: {src.name}")
-        
+        self.current_topic_errors = {} # Reset errors for this file
+
         tf_type_name = "tf2_msgs/msg/TFMessage"
         all_file_stats = []
 
         with Reader(src) as reader:
+            # NOTE: Writer now handles the .part temporary naming internally
             writer = mcap_writer_utils.RollingMcapWriter(base_dst, split_size, Profile.ROS2)
             
             current_stats = {
                 "source_bag": src.name, 
-                "filename": writer.current_file_path.name,
+                "filename": writer.current_file_path.name, # This will be .part initially
                 "output_path": writer.current_file_path, 
                 "start_time": None, "end_time": None,
                 "message_count": 0, "topics": {}
             }
             
+            # ... [Initialize maps... Same as before] ...
             topic_to_chan_id = {}
             conn_map = {}
             type_map = {}
             registered_schemas = {}
-            
+
             try:
-                # --- PASS 1: PRE-REGISTRATION ---
+                # --- PASS 1 --- 
                 for conn in reader.connections:
                     if self.exiter.stop_requested: break
-
+                    
                     ros1_type = conn.msgtype
                     ros2_type = convert_utils.to_ros2_type(ros1_type)
                     
@@ -168,21 +173,12 @@ class BagSeriesConverter:
                 end_ns = reader.end_time or 0
                 total_duration_sec = (end_ns - start_ns) / 1e9
                 last_ts = start_ns
-
-                # --- FIX: Handle Empty/Instant Bags ---
-                # We explicitly print a warning so the batch processor can catch it.
+                
+                # Context manager logic (same as original)
                 if total_duration_sec <= 0.001:
-                    print(f"  [WARN] Bag duration is {total_duration_sec}s. Skipping progress bar.")
-                    # Use a dummy context manager to avoid tqdm crash
-                    context_manager = convert_utils.NoOpContextManager()
+                     context_manager = convert_utils.NoOpContextManager()
                 else:
-                    context_manager = tqdm(
-                        total=total_duration_sec, 
-                        unit="s", 
-                        desc="Converting", 
-                        leave=False,
-                        bar_format="{l_bar}{bar}| {n:.2f}/{total:.2f}s [{elapsed}<{remaining}, {rate_fmt}]"
-                    )
+                     context_manager = tqdm(total=total_duration_sec, unit="s", desc="Converting", leave=False, bar_format="{l_bar}{bar}| {n:.2f}/{total:.2f}s [{elapsed}<{remaining}, {rate_fmt}]")
 
                 with context_manager as pbar:
                     for conn, timestamp, raw_data in reader.messages():
@@ -251,16 +247,35 @@ class BagSeriesConverter:
                         
                         except Exception as e:
                             print(f"[ERR] Conversion failed on topic {conn.topic}: {e}", file=sys.stderr)
+                            err_msg = str(e)
+                            if conn.topic not in self.current_topic_errors:
+                                self.current_topic_errors[conn.topic] = []
+                            self.current_topic_errors[conn.topic].append(err_msg)
 
                 print(f"  [SUCCESS] {current_stats.get('message_count', 0)} messages converted.")
 
             finally:
-                writer.finish()
+                # [NEW RENAMING LOGIC]
+                # Determine success based on whether stop was requested
+                was_successful = not self.exiter.stop_requested
+                
+                # This renames .part -> .mcap OR .part -> .mcap.incomplete
+                final_paths = writer.finalize_filenames(success=was_successful)
+                
+                # Update stats with the REAL final filenames
                 if current_stats["message_count"] > 0:
-                    if current_stats["start_time"] is None: current_stats["start_time"] = 0
-                    if current_stats["end_time"] is None: current_stats["end_time"] = 0
-                    current_stats["duration"] = current_stats["end_time"] - current_stats["start_time"]
-                    all_file_stats.append(current_stats)
+                     if current_stats["start_time"] is None: current_stats["start_time"] = 0
+                     if current_stats["end_time"] is None: current_stats["end_time"] = 0
+                     current_stats["duration"] = current_stats["end_time"] - current_stats["start_time"]
+                     all_file_stats.append(current_stats)
+
+                # Fix paths in stats objects
+                for i, stat in enumerate(all_file_stats):
+                    if i < len(final_paths):
+                        stat["output_path"] = final_paths[i]
+                        stat["filename"] = final_paths[i].name
+
+        return all_file_stats
 
         return all_file_stats
 
@@ -322,6 +337,8 @@ def main():
     converter = BagSeriesConverter(ros_distro=args.distro, enable_plugins=args.with_plugins)
     valid_stats = []
 
+    all_topic_errors = {}
+
     for f in bag_files:
         if converter.exiter.stop_requested: break
 
@@ -329,12 +346,19 @@ def main():
             dst = output_dir / f.with_suffix(".mcap").name
         else:
             dst = f.with_suffix(".mcap")
-
+        
         stats_list = converter.convert_file(
             f, dst, 
             split_size=split_bytes, 
             is_part_of_series=args.series
         )
+        
+        # [NEW] Collect errors
+        if converter.current_topic_errors:
+             for topic, errs in converter.current_topic_errors.items():
+                 if topic not in all_topic_errors: all_topic_errors[topic] = []
+                 all_topic_errors[topic].extend(errs)
+
         if stats_list:
             valid_stats.extend(stats_list)
         
@@ -342,10 +366,27 @@ def main():
             converter.static_tf_cache.clear()
             converter.tf_static_def = None
 
+    # [NEW EXIT LOGIC]
+    if converter.exiter.stop_requested:
+        print(f"\n[WARN] Process interrupted. Marked files as .incomplete.")
+        # Write the summary (which includes the INTERRUPTED status)
+        convert_utils.print_and_save_summary(
+            valid_stats, output_dir, 
+            interrupted=True, 
+            topic_errors=all_topic_errors
+        )
+        # Skip metadata.yaml
+        sys.exit(130)
+
+    # Success path
     if output_dir and valid_stats:
         convert_utils.write_metadata_yaml(output_dir, valid_stats, args.distro)
     
-    convert_utils.print_and_save_summary(valid_stats, output_dir)
+    convert_utils.print_and_save_summary(
+        valid_stats, output_dir, 
+        interrupted=False, 
+        topic_errors=all_topic_errors
+    )
 
 if __name__ == "__main__":
     main()

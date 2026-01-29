@@ -104,19 +104,32 @@ def write_metadata_yaml(folder: Path, stats_list: List[Dict], distro: str):
 
     except Exception as e:
         print(f"[ERR] Failed to generate metadata.yaml: {e}")
-
-def print_and_save_summary(stats_list: List[Dict], output_folder: Optional[Path]):
-    """Prints a table summary and saves it to TXT and YAML files."""
-    if not stats_list:
+def print_and_save_summary(stats_list: List[Dict], output_folder: Optional[Path], 
+                           interrupted: bool = False, 
+                           topic_errors: Dict[str, List[str]] = None):
+    """
+    Prints a table summary and saves detailed stats to YAML.
+    Includes explicit error logs and interruption status.
+    """
+    if not stats_list and not topic_errors:
         return
 
     host_mount = os.environ.get("HOST_DATA_DIR")
-    summary_data_for_yaml = []
+    status_str = "INTERRUPTED" if interrupted else "SUCCESS"
     
-    # Prepare text lines
+    # --- Prepare Data for YAML ---
+    summary_data_for_yaml = {
+        "status": status_str,
+        "total_files": len(stats_list),
+        "conversions": [],
+        "errors": topic_errors if topic_errors else {}
+    }
+
+    # --- Prepare Text Report ---
     lines = []
     lines.append("="*120)
     lines.append(f"{'CONVERSION SUMMARY':^120}")
+    lines.append(f"{'Status: ' + status_str:^120}")
     lines.append("="*120)
     header = f"{'Source Input':<25} | {'Output File':<25} | {'Msgs':<10} | {'Full Output Path (Host)':<50}"
     lines.append(header)
@@ -139,16 +152,13 @@ def print_and_save_summary(stats_list: List[Dict], output_folder: Optional[Path]
                      final_host_path = Path(host_mount) / rel
                 else:
                      final_host_path = Path(host_mount) / p
-                
                 display_path = str(final_host_path)
             except ValueError:
                 pass 
 
-        # Add to Text Report
         lines.append(f"{src_name:<25} | {out_name:<25} | {msg_count:<10} | {display_path}")
 
-        # Add to YAML Data
-        summary_data_for_yaml.append({
+        summary_data_for_yaml["conversions"].append({
             "source_input": src_name,
             "output_file": out_name,
             "message_count": msg_count,
@@ -156,7 +166,22 @@ def print_and_save_summary(stats_list: List[Dict], output_folder: Optional[Path]
             "duration_sec": float(s.get("duration", 0)) / 1e9
         })
 
-    lines.append("="*120 + "\n")
+    lines.append("="*120)
+
+    # --- Append Error Section to Text Report ---
+    if topic_errors:
+        lines.append("\n" + "!"*120)
+        lines.append(f"{'ERROR REPORT':^120}")
+        lines.append("!"*120)
+        for topic, errs in topic_errors.items():
+            lines.append(f"TOPIC: {topic}")
+            unique_errors = sorted(list(set(errs)))
+            for i, err in enumerate(unique_errors):
+                lines.append(f"  - {err}")
+                if i >= 4: 
+                    lines.append(f"    ... and {len(unique_errors) - 5} other unique errors.")
+                    break
+        lines.append("!"*120 + "\n")
 
     # 1. Print to Console
     print("\n".join(lines))
@@ -175,7 +200,7 @@ def print_and_save_summary(stats_list: List[Dict], output_folder: Optional[Path]
         yaml_path = output_folder / "conversion_summary.yaml"
         try:
             with open(yaml_path, "w") as f:
-                yaml.dump({"conversions": summary_data_for_yaml}, f, sort_keys=False)
+                yaml.dump(summary_data_for_yaml, f, sort_keys=False)
             print(f"[INFO] Summaries saved to:\n       - {txt_path}\n       - {yaml_path}")
         except Exception as e:
             print(f"[WARN] Could not save summary YAML: {e}")

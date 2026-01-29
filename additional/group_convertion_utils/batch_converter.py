@@ -4,6 +4,7 @@ import subprocess
 import socket
 import time
 import urllib.request
+import yaml  # REQUIRED: You might need to install PyYAML if not present
 from pathlib import Path
 
 # --- Notification Utility ---
@@ -65,73 +66,111 @@ def run_batch_conversion(src_root, dst_root, converter_cmd, ntfy_topic=None, **k
     start_time = time.time()
     success_count, fail_count, skipped_count = 0, 0, 0
 
-    for index, current_input_path in enumerate(tasks, 1):
-        relative_path = current_input_path.relative_to(src_root)
-        target_output_folder = dst_root / relative_path
-        
-        if (target_output_folder / "metadata.yaml").exists():
-            print(f"[{index}/{total_tasks}] [SKIP] {relative_path}")
-            skipped_count += 1
-            continue
+    try:
+        for index, current_input_path in enumerate(tasks, 1):
+            relative_path = current_input_path.relative_to(src_root)
+            target_output_folder = dst_root / relative_path
+            
+            # --- INTELLIGENT SKIP LOGIC ---
+            should_skip = False
+            summary_file = target_output_folder / "conversion_summary.yaml"
+            metadata_file = target_output_folder / "metadata.yaml"
+            
+            # Priority 1: Check the rich summary for status
+            if summary_file.exists():
+                try:
+                    with open(summary_file, 'r') as f:
+                        data = yaml.safe_load(f)
+                        status = data.get("status", "UNKNOWN")
+                        
+                        if status == "SUCCESS":
+                            print(f"[{index}/{total_tasks}] [SKIP] {relative_path} (Already Success)")
+                            should_skip = True
+                        elif status == "INTERRUPTED":
+                            print(f"[{index}/{total_tasks}] [RESUME] {relative_path} (Previous: Interrupted)")
+                        else:
+                            print(f"[{index}/{total_tasks}] [RETRY] {relative_path} (Status: {status})")
+                except Exception as e:
+                     print(f"[{index}/{total_tasks}] [RETRY] {relative_path} (Corrupt Summary: {e})")
+            
+            # Priority 2: Fallback for legacy conversions (before we added summary)
+            elif metadata_file.exists():
+                print(f"[{index}/{total_tasks}] [SKIP] {relative_path} (Legacy Completion)")
+                should_skip = True
 
-        print(f"\n[{index}/{total_tasks}] [Processing] {relative_path}")
-        
-        # Build command dynamically
-        cmd = [converter_cmd, str(current_input_path)]
-        
-        # Forward arguments to the underlying converter
-        if kwargs.get('series'): cmd.append("--series")
-        if kwargs.get('with_plugins'): cmd.append("--with-plugins")
-        if kwargs.get('split_size'): cmd.extend(["--split-size", kwargs['split_size']])
-        if kwargs.get('distro'): cmd.extend(["--distro", kwargs['distro']])
-        if dry_run: cmd.append("--dry-run")
-        
-        cmd.extend(["--out-dir", str(target_output_folder)])
+            if should_skip:
+                skipped_count += 1
+                continue
 
-        print(f"  [EXEC] {' '.join(cmd)}")
+            print(f"\n[{index}/{total_tasks}] [Processing] {relative_path}")
+            
+            # Build command dynamically
+            cmd = [converter_cmd, str(current_input_path)]
+            
+            # Forward arguments to the underlying converter
+            if kwargs.get('series'): cmd.append("--series")
+            if kwargs.get('with_plugins'): cmd.append("--with-plugins")
+            if kwargs.get('split_size'): cmd.extend(["--split-size", kwargs['split_size']])
+            if kwargs.get('distro'): cmd.extend(["--distro", kwargs['distro']])
+            if dry_run: cmd.append("--dry-run")
+            
+            cmd.extend(["--out-dir", str(target_output_folder)])
 
-        if dry_run:
-            success_count += 1 
-            print("  [Dry Run] No action taken.")
-        else:
-            try:
-                target_output_folder.parent.mkdir(parents=True, exist_ok=True)
-                t0 = time.time()
-                
-                # Execute and capture output
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                
-                if result.stdout: print(result.stdout, end='')
-                if result.stderr: print(result.stderr, end='')
+            print(f"  [EXEC] {' '.join(cmd)}")
 
-                duration = time.time() - t0
-                success_count += 1
-                
-                send_ntfy(
-                    ntfy_topic, 
-                    f"Converted: {relative_path}\nDuration: {duration:.1f}s", 
-                    title=f"File {index}/{total_tasks} Success", 
-                    tags=["white_check_mark"]
-                )
-                
-                if "[WARN] Bag duration is" in result.stdout:
+            if dry_run:
+                success_count += 1 
+                print("  [Dry Run] No action taken.")
+            else:
+                try:
+                    target_output_folder.parent.mkdir(parents=True, exist_ok=True)
+                    t0 = time.time()
+                    
+                    # Execute and capture output
+                    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    
+                    if result.stdout: print(result.stdout, end='')
+                    if result.stderr: print(result.stderr, end='')
+
+                    duration = time.time() - t0
+                    success_count += 1
+                    
+                    send_ntfy(
+                        ntfy_topic, 
+                        f"Converted: {relative_path}\nDuration: {duration:.1f}s", 
+                        title=f"File {index}/{total_tasks} Success", 
+                        tags=["white_check_mark"]
+                    )
+                    
+                    if "[WARN] Bag duration is" in result.stdout:
+                        bag_count, size_str = get_folder_bag_stats(current_input_path)
+                        send_ntfy(ntfy_topic, f"Empty Bag: {relative_path}\n{size_str}", title="Warning", priority="high", tags=["warning"])
+                    
+                except subprocess.CalledProcessError as e:
+                    # [NEW] Handle manual interruption (Exit Code 130)
+                    if e.returncode == 130:
+                        print(f"  [STOP] Batch processing interrupted by user.")
+                        # Stop the entire batch loop
+                        break 
+
+                    fail_count += 1
                     bag_count, size_str = get_folder_bag_stats(current_input_path)
-                    send_ntfy(ntfy_topic, f"Empty Bag: {relative_path}\n{size_str}", title="Warning", priority="high", tags=["warning"])
-                
-            except subprocess.CalledProcessError as e:
-                fail_count += 1
-                bag_count, size_str = get_folder_bag_stats(current_input_path)
-                # Show the last line of stderr in the alert
-                err_summary = e.stderr.strip().splitlines()[-1] if e.stderr else "Subprocess failed"
-                send_ntfy(ntfy_topic, f"Failed: {relative_path}\n{size_str}\n{err_summary}", title="Conversion Error", priority="high", tags=["x"])
-                print(f"  [ERROR] {e.stderr}")
-                
-            except Exception as e:
-                fail_count += 1
-                send_ntfy(ntfy_topic, f"Critical Error: {str(e)}", title="Critical Failure", priority="urgent", tags=["skull"])
+                    
+                    # Show the last line of stderr in the alert
+                    err_summary = e.stderr.strip().splitlines()[-1] if e.stderr else "Subprocess failed"
+                    
+                    send_ntfy(ntfy_topic, f"Failed: {relative_path}\n{size_str}\n{err_summary}", title="Conversion Error", priority="high", tags=["x"])
+                    print(f"  [ERROR] {e.stderr}")
+                    
+                except Exception as e:
+                    fail_count += 1
+                    send_ntfy(ntfy_topic, f"Critical Error: {str(e)}", title="Critical Failure", priority="urgent", tags=["skull"])
+
+    except KeyboardInterrupt:
+        print("\n\n[INFO] Batch script stopped by user.")
 
     total_duration = time.time() - start_time
-    summary = f"Finished in {total_duration/60:.1f}m\nSuccess: {success_count}\nFail: {fail_count}"
+    summary = f"Finished in {total_duration/60:.1f}m\nSuccess: {success_count}\nFail: {fail_count}\nSkipped: {skipped_count}"
     print(f"\n{'='*30}\n{summary}\n{'='*30}")
 
     if not dry_run:
