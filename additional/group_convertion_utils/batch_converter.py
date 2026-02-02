@@ -60,8 +60,16 @@ def run_batch_conversion(src_root, dst_root, converter_cmd, ntfy_topic=None, **k
     total_tasks = len(tasks)
     print(f"Found {total_tasks} folders to process.")
 
-    if not dry_run:
-        send_ntfy(ntfy_topic, f"Started batch conversion of {total_tasks} folders.", title="Batch Started", tags=["rocket"])
+    # [MODIFIED] Setup prefix for notifications so you know it's a test
+    mode_prefix = "[DRY RUN] " if dry_run else ""
+
+    # [MODIFIED] Always send Start Notification (removed 'if not dry_run')
+    send_ntfy(
+        ntfy_topic, 
+        f"{mode_prefix}Started batch conversion of {total_tasks} folders.", 
+        title=f"{mode_prefix}Batch Started", 
+        tags=["rocket"]
+    )
 
     start_time = time.time()
     success_count, fail_count, skipped_count = 0, 0, 0
@@ -121,6 +129,8 @@ def run_batch_conversion(src_root, dst_root, converter_cmd, ntfy_topic=None, **k
             if dry_run:
                 success_count += 1 
                 print("  [Dry Run] No action taken.")
+                # Note: We do NOT send per-file notifications in Dry Run to avoid 
+                # flooding the ntfy server (dry runs are too fast).
             else:
                 try:
                     target_output_folder.parent.mkdir(parents=True, exist_ok=True)
@@ -173,8 +183,13 @@ def run_batch_conversion(src_root, dst_root, converter_cmd, ntfy_topic=None, **k
     summary = f"Finished in {total_duration/60:.1f}m\nSuccess: {success_count}\nFail: {fail_count}\nSkipped: {skipped_count}"
     print(f"\n{'='*30}\n{summary}\n{'='*30}")
 
-    if not dry_run:
-        send_ntfy(ntfy_topic, summary, title="Batch Complete", tags=["tada" if fail_count == 0 else "warning"])
+    # [MODIFIED] Always send Completion Notification (removed 'if not dry_run')
+    send_ntfy(
+        ntfy_topic, 
+        summary, 
+        title=f"{mode_prefix}Batch Complete", 
+        tags=["tada" if fail_count == 0 else "warning"]
+    )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Smart Batch Convert ROS1 -> MCAP")

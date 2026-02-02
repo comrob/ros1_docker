@@ -223,6 +223,11 @@ class GracefulExiter:
             sys.exit(1)
 
 def to_ros2_type(ros1_type: str) -> str:
+    """
+    Converts a ROS1 type string to a ROS2 Python/Internal type string.
+    NOTE: This returns the format 'package/msg/Name', which is used for 
+    looking up Python classes in 'rosbags'. It is NOT for schema definitions.
+    """
     if ros1_type == 'Header': return 'std_msgs/msg/Header'
     if "/msg/" not in ros1_type and "/" in ros1_type:
         parts = ros1_type.split('/')
@@ -231,6 +236,12 @@ def to_ros2_type(ros1_type: str) -> str:
     return ros1_type
 
 def fix_ros1_def(text: str, type_name: str) -> str:
+    """
+    Cleans up ROS1 message definitions to be valid ROS2 .msg schemas.
+    CRITICAL FIX: This generates the textual definition. It must use
+    'package/Name' format (e.g., 'std_msgs/Header'), NOT 'package/msg/Name'.
+    """
+    # 1. CameraInfo specific field name fixes (ROS1 uses capitalized, ROS2 lower)
     if "CameraInfo" in type_name:
         text = text.replace("float64[] D", "float64[] d")
         text = text.replace("float64[9] K", "float64[9] k")
@@ -242,36 +253,65 @@ def fix_ros1_def(text: str, type_name: str) -> str:
     
     for line in lines:
         stripped = line.strip()
+        
+        # Preserve empty lines
         if not stripped:
             fixed_lines.append(line)
             continue
-        if stripped.startswith("uint32 seq"): continue
+            
+        # Remove sequence IDs (deprecated in ROS2)
+        if stripped.startswith("uint32 seq"): 
+            continue
+            
+        # Handle Nested Definitions (MSG: separator)
         if stripped.startswith("MSG:"):
-            line = re.sub(r'(^MSG:\s+)([a-zA-Z0-9_]+)/(?!msg/)([a-zA-Z0-9_]+)', r'\1\2/msg/\3', line)
+            # FIX: Do NOT inject '/msg/' here. Keep it as Package/Name.
+            # We just return the line as is, unless it needs whitespace trimming.
             fixed_lines.append(line)
             continue
 
+        # Parse field definitions: "type name"
+        # Regex breakdown: (indent)(type)(whitespace)(name)(comment/rest)
         match = re.match(r'^(\s*)([a-zA-Z0-9_/\[\]]+)(\s+)([^#\s]+)(.*)$', line)
         if match:
             indent, type_str, ws, name_str, rest = match.groups()
             
-            if type_str == 'time': type_str = 'builtin_interfaces/msg/Time'
-            elif type_str == 'duration': type_str = 'builtin_interfaces/msg/Duration'
-            elif type_str == 'Header': type_str = 'std_msgs/msg/Header'
+            # --- Type Mapping Fixes ---
             
-            if '/' in type_str and '/msg/' not in type_str:
-                base_type = type_str.split('[')[0] 
-                suffix = type_str[len(base_type):] 
-                parts = base_type.split('/')
-                if len(parts) == 2:
-                    type_str = f"{parts[0]}/msg/{parts[1]}{suffix}"
+            # 1. Handle Built-ins
+            # ROS2 .msg files use 'builtin_interfaces/Time', NOT '.../msg/Time'
+            if type_str == 'time': 
+                type_str = 'builtin_interfaces/Time'
+            elif type_str == 'duration': 
+                type_str = 'builtin_interfaces/Duration'
+            elif type_str == 'Header': 
+                type_str = 'std_msgs/Header'
+            
+            # 2. Handle Arrays (strip [] temporarily to check type)
+            base_type = type_str.split('[')[0] 
+            suffix = type_str[len(base_type):] # e.g., "[]" or "[9]"
 
+            # 3. Standardize Package/Name format
+            # If it looks like 'geometry_msgs/Point', keep it.
+            # If the user's previous code injected '/msg/', we would have to remove it,
+            # but here we just ensure we don't add it.
+            
+            # (Self-Correction logic if input was already malformed or weird)
+            if '/msg/' in base_type:
+                # OPTIONAL: Aggressively fix if input is already bad
+                base_type = base_type.replace('/msg/', '/')
+            
+            # Reconstruct type string
+            type_str = f"{base_type}{suffix}"
+
+            # --- Name Mapping Fixes ---
             if "CameraInfo" in type_name:
                 if name_str in ['D', 'K', 'R', 'P']: name_str = name_str.lower()
 
             new_line = f"{indent}{type_str}{ws}{name_str}{rest}"
             fixed_lines.append(new_line)
         else:
+            # Pass through comments or unparseable lines
             fixed_lines.append(line)
 
     return "\n".join(fixed_lines)
