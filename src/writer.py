@@ -109,14 +109,18 @@ class RollingMcapWriter:
         Renames all generated .part files to their final state.
         If success=True:  .mcap.part -> .mcap
         If success=False: .mcap.part -> .mcap.incomplete
-        Returns list of final paths.
+        
+        [NEW] If more than one file exists, the first file is renamed to _0.mcap
         """
         # Ensure everything is closed first
         self.finish()
 
         final_paths = []
         
-        for temp_path in self.generated_segments:
+        # Detect if we have a sequence (more than 1 file generated)
+        is_sequence = len(self.generated_segments) > 1
+        
+        for i, temp_path in enumerate(self.generated_segments):
             if not temp_path.exists():
                 continue
                 
@@ -124,8 +128,17 @@ class RollingMcapWriter:
             # Remove ".part" to get the base "data.mcap"
             base_name = temp_path.with_suffix("") 
             
+            # --- LOGIC CHANGE START ---
+            # If this is the first file (index 0) AND it is part of a sequence,
+            # rename "data.mcap" to "data_0.mcap"
+            if i == 0 and is_sequence:
+                stem = base_name.stem
+                parent = base_name.parent
+                base_name = parent / f"{stem}_0.mcap"
+            # --- LOGIC CHANGE END ---
+
             if success:
-                new_path = base_name # "data.mcap"
+                new_path = base_name # "data.mcap" or "data_0.mcap"
             else:
                 # Add .incomplete suffix to the base name -> "data.mcap.incomplete"
                 new_path = base_name.with_suffix(base_name.suffix + ".incomplete")
